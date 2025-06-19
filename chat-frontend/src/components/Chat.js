@@ -4,99 +4,157 @@ import SockJS from 'sockjs-client';
 import './Chat.css';
 
 const Chat = () => {
-    const [messages, setMessages] = useState([]);
-    const [privateMessages, setPrivateMessages] = useState([]);
-    const [input, setInput] = useState("");
-    const [username, setUsername] = useState("");
-    const [isConnected, setIsConnected] = useState(false);
-    const [activeChat, setActiveChat] = useState("public");
-    const [usersOnline, setUsersOnline] = useState([]);
-    const stompClient = useRef(null);
+    // State management
+    const [messages, setMessages] = useState([]); // Stores public chat messages
+    const [privateMessages, setPrivateMessages] = useState([]); // Stores private messages
+    const [input, setInput] = useState(""); // Current message input
+    const [username, setUsername] = useState(""); // Current user's username
+    const [isConnected, setIsConnected] = useState(false); // WebSocket connection status
+    const [activeChat, setActiveChat] = useState("public"); // Current chat (public or private)
+    const [usersOnline, setUsersOnline] = useState([]); // List of online users
+    const stompClient = useRef(null); // Reference to STOMP client
 
+    // WebSocket connection and subscription management
     useEffect(() => {
-        if (!username) return;
+        if (!username) return; // Don't connect without username
 
-        const socket = new SockJS('http://localhost:8080/ws');
+        // Initialize SockJS connection
+        const socket = new SockJS('https://ink-encounter-fails-www.trycloudflare.comgt/ws');
+
+        // Configure STOMP client
         stompClient.current = new Client({
             webSocketFactory: () => socket,
-            debug: (str) => console.log(str),
-            reconnectDelay: 5000,
+            debug: (str) => console.log('[STOMP DEBUG]', str), // Enhanced debugging
+            reconnectDelay: 5000, // Reconnect after 5 seconds if disconnected
+            heartbeatIncoming: 4000, // Heartbeat settings for connection stability
+            heartbeatOutgoing: 4000,
+
+            // Connection established callback
             onConnect: () => {
+                console.log('Successfully connected to WebSocket');
                 setIsConnected(true);
 
-                // Register user
+                // Register user with the server
                 stompClient.current.publish({
                     destination: '/app/chat.register',
-                    body: JSON.stringify({ sender: username, type: 'JOIN' })
+                    body: JSON.stringify({
+                        sender: username,
+                        type: 'JOIN',
+                        timestamp: new Date().toISOString()
+                    })
                 });
 
-                // Subscribe to public messages
+                // Subscribe to public messages channel
                 stompClient.current.subscribe('/topic/public', (message) => {
                     const newMessage = JSON.parse(message.body);
                     setMessages(prev => [...prev, newMessage]);
                 });
 
-                // Subscribe to private messages
-                stompClient.current.subscribe(`/user/queue/private`, (message) => {
+                // Subscribe to private messages queue
+                stompClient.current.subscribe('/user/queue/private', (message) => {
                     const newMessage = JSON.parse(message.body);
                     setPrivateMessages(prev => [...prev, newMessage]);
                 });
 
                 // Subscribe to online users updates
                 stompClient.current.subscribe('/topic/users', (message) => {
-                    setUsersOnline(JSON.parse(message.body));
+                    const onlineUsers = JSON.parse(message.body);
+                    setUsersOnline(onlineUsers);
+                    console.log('Online users updated:', onlineUsers);
                 });
             },
+
+            // Connection lost callback
             onDisconnect: () => {
-                if (username) {
-                    stompClient.current.publish({
-                        destination: '/app/chat.leave',
-                        body: JSON.stringify({ sender: username, type: 'LEAVE' })
-                    });
+                console.log('WebSocket connection lost');
+                setIsConnected(false);
+
+                // Notify server about user leaving (if possible)
+                if (username && stompClient.current) {
+                    try {
+                        stompClient.current.publish({
+                            destination: '/app/chat.leave',
+                            body: JSON.stringify({
+                                sender: username,
+                                type: 'LEAVE',
+                                timestamp: new Date().toISOString()
+                            })
+                        });
+                    } catch (e) {
+                        console.error('Failed to send leave message:', e);
+                    }
                 }
+            },
+
+            // STOMP protocol errors
+            onStompError: (error) => {
+                console.error('STOMP protocol error:', error);
                 setIsConnected(false);
             }
         });
 
+        // Handle underlying WebSocket errors
+        socket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            setIsConnected(false);
+        };
+
+        // Activate the STOMP client
         stompClient.current.activate();
 
-        // Cleanup on component unmount
+        // Cleanup function for component unmount
         return () => {
             if (stompClient.current) {
                 stompClient.current.deactivate();
             }
         };
-    }, [username]);
+    }, [username]); // Re-run effect when username changes
 
+    // Handle user login
     const handleLogin = (e) => {
         e.preventDefault();
         if (username.trim()) {
-            setIsConnected(true);
+            // Connection will be established in useEffect
+            console.log('User logging in:', username);
         }
     };
 
+    // Send chat message
     const sendMessage = () => {
-        if (!isConnected || !input.trim()) return;
+        if (!isConnected || !input.trim()) {
+            console.warn('Cannot send message - not connected or empty input');
+            return;
+        }
 
-        const message = {
-            sender: username,
-            content: input,
-            type: activeChat === 'public' ? 'CHAT' : 'PRIVATE',
-            receiver: activeChat === 'public' ? null : activeChat
-        };
+        try {
+            const message = {
+                sender: username,
+                content: input,
+                type: activeChat === 'public' ? 'CHAT' : 'PRIVATE',
+                receiver: activeChat === 'public' ? null : activeChat,
+                timestamp: new Date().toISOString()
+            };
 
-        const destination = activeChat === 'public'
-            ? '/app/chat.send'
-            : '/app/chat.private';
+            const destination = activeChat === 'public'
+                ? '/app/chat.send'
+                : '/app/chat.private';
 
-        stompClient.current.publish({
-            destination,
-            body: JSON.stringify(message)
-        });
-        setInput("");
+            stompClient.current.publish({
+                destination,
+                body: JSON.stringify(message)
+            });
+
+            setInput(""); // Clear input field after sending
+            console.log('Message sent:', message);
+        } catch (error) {
+            console.error('Error sending message:', error);
+            setIsConnected(false);
+        }
     };
 
+    // Handle user logout
     const handleLogout = () => {
+        console.log('User logging out:', username);
         if (stompClient.current) {
             stompClient.current.deactivate();
         }
@@ -104,6 +162,23 @@ const Chat = () => {
         setIsConnected(false);
         setMessages([]);
         setPrivateMessages([]);
+    };
+
+    // Handle pressing Enter key to send message
+    const handleKeyPress = (e) => {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    };
+
+    // Filter messages for the current chat
+    const getFilteredMessages = () => {
+        if (activeChat === 'public') {
+            return messages;
+        }
+        return privateMessages.filter(msg =>
+            msg.sender === activeChat || msg.receiver === activeChat
+        );
     };
 
     return (
@@ -118,6 +193,7 @@ const Chat = () => {
                             value={username}
                             onChange={(e) => setUsername(e.target.value)}
                             required
+                            autoFocus
                         />
                         <button type="submit">Join Chat</button>
                     </form>
@@ -128,6 +204,9 @@ const Chat = () => {
                         <div className="user-info">
                             <span>Hello, {username}!</span>
                             <button onClick={handleLogout}>Logout</button>
+                            <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
+                                {isConnected ? 'Online' : 'Offline'}
+                            </div>
                         </div>
                         <div className="online-users">
                             <h3>Online Users ({usersOnline.length})</h3>
@@ -152,26 +231,25 @@ const Chat = () => {
                     </div>
                     <div className="chat-area">
                         <div className="chat-header">
-                            <h3>{activeChat === 'public' ? 'Public Chat' : `Private Chat with ${activeChat}`}</h3>
+                            <h3>
+                                {activeChat === 'public'
+                                    ? 'Public Chat'
+                                    : `Private Chat with ${activeChat}`}
+                            </h3>
                         </div>
                         <div className="messages">
-                            {(activeChat === 'public' ? messages : privateMessages
-                                .filter(msg =>
-                                    activeChat === 'public' ||
-                                    msg.sender === activeChat ||
-                                    msg.receiver === activeChat))
-                                .map((msg, i) => (
-                                    <div
-                                        key={i}
-                                        className={`message ${msg.sender === username ? 'sent' : 'received'}`}
-                                    >
-                                        <div className="message-sender">{msg.sender}</div>
-                                        <div className="message-content">{msg.content}</div>
-                                        <div className="message-time">
-                                            {new Date(msg.timestamp).toLocaleTimeString()}
-                                        </div>
+                            {getFilteredMessages().map((msg, i) => (
+                                <div
+                                    key={i}
+                                    className={`message ${msg.sender === username ? 'sent' : 'received'}`}
+                                >
+                                    <div className="message-sender">{msg.sender}</div>
+                                    <div className="message-content">{msg.content}</div>
+                                    <div className="message-time">
+                                        {new Date(msg.timestamp).toLocaleTimeString()}
                                     </div>
-                                ))}
+                                </div>
+                            ))}
                         </div>
                         <div className="message-input">
                             <input
@@ -179,10 +257,14 @@ const Chat = () => {
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
                                 placeholder={`Message ${activeChat === 'public' ? 'everyone' : activeChat}`}
-                                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                                onKeyPress={handleKeyPress}
+                                disabled={!isConnected}
                             />
-                            <button onClick={sendMessage} disabled={!isConnected}>
-                                Send
+                            <button
+                                onClick={sendMessage}
+                                disabled={!isConnected || !input.trim()}
+                            >
+                                {isConnected ? 'Send' : 'Connecting...'}
                             </button>
                         </div>
                     </div>
